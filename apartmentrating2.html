@@ -1,5 +1,7 @@
-# Create an optimized v3 with IME-safe inputs and incremental updates (no full rerender on each keystroke)
-html = r"""<!DOCTYPE html>
+# Write a CLEAN copy (no stray Python text) and a deployable zip with index.html
+import os, zipfile, textwrap, json
+
+html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -60,242 +62,112 @@ html = r"""<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- 权重设置 -->
     <div class="card">
       <div class="card-h"><h2>权重调整（总分 100）· Weights</h2></div>
       <div class="card-c">
-        <div class="weights-row" id="weightsGrid">
-          <!-- 动态填充 -->
-        </div>
+        <div class="weights-row" id="weightsGrid"></div>
         <div class="hint">输入时不再整卡重渲染。使用合成文本（IME）也不会打断。</div>
       </div>
     </div>
 
-    <!-- 房源列表 -->
     <div id="rowsRoot"></div>
   </div>
 
 <script>
-/* ---------- 数据结构 ---------- */
 const defaultWeights = {
-  noise: 20,
-  safety: 15,
-  builtYear: 8,
-  floorLevel: 8,
-  flooring: 8,
-  transit: 10,
-  highwayDistance: 6,
-  flightPath: 6,
-  fees: 8,
-  leaseTerms: 6,
-  amenities: 5,
-  reviews: 8
+  noise: 20, safety: 15, builtYear: 8, floorLevel: 8, flooring: 8,
+  transit: 10, highwayDistance: 6, flightPath: 6, fees: 8,
+  leaseTerms: 6, amenities: 5, reviews: 8
 };
-
-function emptyRow(){
-  return {
-    name: "",
-    address: "",
-    rent: 0,
-    leaseMonths: 12,
-    promoWeeks: 0,
-    builtYear: 2015,
-    floorLevel: 3,
-    flooring: "wood",
-    distanceToTransitKm: 1.0,
-    distanceToHighwayKm: 1.0,
-    nearArterial: false,
-    underFlightPath: false,
-    airportMinutes: 20,
-    noiseUserScore: 5,   // 1 quiet — 10 noisy
-    safetyScore: 7,      // 1 low   — 10 high
-    parkingFee1: 0,
-    parkingFee2: 0,
-    trashFee: 0,
-    packageLocker: true,
-    gated: true,
-    pestsSeen: false,
-    subleaseAllowed: true,
-    leaseBreakReasonable: true,
-    parkingType: "uncovered",
-    googleRating: 4.2,
-    yelpRating: 4.0,
-    note: ""
-  };
-}
-
-/* ---------- 工具函数 ---------- */
-const $ = (sel,root=document)=>root.querySelector(sel);
-function clamp01(x){ return Math.max(0, Math.min(1, x)); }
-function toNumber(n){ const v = Number(n); return Number.isFinite(v) ? v : 0; }
-
+function emptyRow(){ return {
+  name:"", address:"", rent:0, leaseMonths:12, promoWeeks:0,
+  builtYear:2015, floorLevel:3, flooring:"wood",
+  distanceToTransitKm:1, distanceToHighwayKm:1, nearArterial:false, underFlightPath:false, airportMinutes:20,
+  noiseUserScore:5, safetyScore:7, parkingFee1:0, parkingFee2:0, trashFee:0,
+  packageLocker:true, gated:true, pestsSeen:false, subleaseAllowed:true, leaseBreakReasonable:true, parkingType:"uncovered",
+  googleRating:4.2, yelpRating:4.0, note:""
+};}
+const $=(s,r=document)=>r.querySelector(s);
+function clamp01(x){return Math.max(0,Math.min(1,x));}
+function toNumber(n){const v=Number(n);return Number.isFinite(v)?v:0;}
 function calcEffectiveRent(row){
-  const rent = toNumber(row.rent);
-  const months = Math.max(1, toNumber(row.leaseMonths));
-  const promoWeeks = Math.max(0, toNumber(row.promoWeeks));
-  const promoDiscount = (rent * promoWeeks) / months / 4.33; // 约 4.33 周/月
-  return Math.max(0, rent - promoDiscount);
+  const rent=toNumber(row.rent), months=Math.max(1,toNumber(row.leaseMonths)), promoWeeks=Math.max(0,toNumber(row.promoWeeks));
+  const promoDiscount=(rent*promoWeeks)/months/4.33; return Math.max(0, rent - promoDiscount);
 }
-function calcNetMonthly(row){
-  const eff = calcEffectiveRent(row);
-  const fees = Math.max(0, toNumber(row.trashFee) + toNumber(row.parkingFee1) + toNumber(row.parkingFee2));
-  return Math.round(eff + fees);
+function calcNetMonthly(row){return Math.round(calcEffectiveRent(row) + Math.max(0, toNumber(row.trashFee)+toNumber(row.parkingFee1)+toNumber(row.parkingFee2)));}
+function scoreRow(row,weights){
+  const wSum=Object.values(weights).reduce((a,b)=>a+b,0);
+  const userQuiet=1-clamp01((row.noiseUserScore-1)/9);
+  let highwayAdj=0; if(row.distanceToHighwayKm<0.2) highwayAdj=-0.3; else if(row.distanceToHighwayKm<0.5) highwayAdj=-0.2; else if(row.distanceToHighwayKm<1) highwayAdj=-0.1;
+  const flightAdj=row.underFlightPath?-0.3:0, arterialAdj=row.nearArterial?-0.1:0;
+  const noiseScore=clamp01(userQuiet+highwayAdj+flightAdj+arterialAdj);
+  const safetyScore=clamp01((toNumber(row.safetyScore)-1)/9);
+  const yearNorm=clamp01((toNumber(row.builtYear)-2010)/(2025-2010));
+  const floorNorm=row.floorLevel>=3?1:clamp01(row.floorLevel/3);
+  const flooringScore=({wood:1,mix:0.6,carpet:0.2})[row.flooring]??0.5;
+  const d=toNumber(row.distanceToTransitKm); let transitScore= d<=0.5?1: d<=2?0.8: d<=3.5?0.5: d<=5?0.3:0.1;
+  const h=toNumber(row.distanceToHighwayKm); let highwayScore= h>=2?1: h>=1?0.7: h>=0.5?0.5: h>=0.2?0.3:0.1;
+  const flightPathScore=row.underFlightPath?0.1:1;
+  const fee=Math.max(0,toNumber(row.parkingFee1)+toNumber(row.parkingFee2)+toNumber(row.trashFee)); const feesScore=clamp01(1-fee/400);
+  const leaseTermsScore=(row.subleaseAllowed?0.5:0)+(row.leaseBreakReasonable?0.5:0);
+  const amenitiesScore=clamp01((row.gated?0.35:0)+(row.packageLocker?0.35:0)+(row.parkingType==="garage"?0.3:row.parkingType==="covered"?0.2:0.1));
+  const reviewsScore=clamp01(((toNumber(row.googleRating)/5)+(toNumber(row.yelpRating)/5))/2);
+  const total=(noiseScore*weights.noise + safetyScore*weights.safety + yearNorm*weights.builtYear + floorNorm*weights.floorLevel + flooringScore*weights.flooring + transitScore*weights.transit + highwayScore*weights.highwayDistance + flightPathScore*weights.flightPath + feesScore*weights.fees + leaseTermsScore*weights.leaseTerms + amenitiesScore*weights.amenities + reviewsScore*weights.reviews)/wSum;
+  return { total:Math.round(total*100),
+    subs:{ noise:Math.round(noiseScore*100), safety:Math.round(safetyScore*100), year:Math.round(yearNorm*100), floor:Math.round(floorNorm*100),
+      flooring:Math.round(flooringScore*100), transit:Math.round(transitScore*100), highway:Math.round(highwayScore*100), flight:Math.round(flightPathScore*100),
+      fees:Math.round(feesScore*100), lease:Math.round(leaseTermsScore*100), amenities:Math.round(amenitiesScore*100), reviews:Math.round(reviewsScore*100),
+      effectiveRent:Math.round(calcEffectiveRent(row)), netMonthly:calcNetMonthly(row)} };
 }
-
-function scoreRow(row, weights){
-  const wSum = Object.values(weights).reduce((a,b)=>a+b,0);
-
-  const userQuiet = 1 - clamp01((row.noiseUserScore - 1) / 9);
-  let highwayAdj = 0;
-  if (row.distanceToHighwayKm < 0.2) highwayAdj = -0.3;
-  else if (row.distanceToHighwayKm < 0.5) highwayAdj = -0.2;
-  else if (row.distanceToHighwayKm < 1) highwayAdj = -0.1;
-  const flightAdj = row.underFlightPath ? -0.3 : 0;
-  const arterialAdj = row.nearArterial ? -0.1 : 0;
-  const noiseScore = clamp01(userQuiet + highwayAdj + flightAdj + arterialAdj);
-
-  const safetyScore = clamp01((toNumber(row.safetyScore) - 1) / 9);
-  const yearNorm = clamp01((toNumber(row.builtYear) - 2010) / (2025 - 2010));
-  const floorNorm = row.floorLevel >= 3 ? 1 : clamp01(row.floorLevel / 3);
-  const flooringMap = { wood: 1, mix: 0.6, carpet: 0.2 };
-  const flooringScore = flooringMap[row.flooring] ?? 0.5;
-
-  const d = toNumber(row.distanceToTransitKm);
-  let transitScore = 0;
-  if (d <= 0.5) transitScore = 1;
-  else if (d <= 2) transitScore = 0.8;
-  else if (d <= 3.5) transitScore = 0.5;
-  else if (d <= 5) transitScore = 0.3;
-  else transitScore = 0.1;
-
-  const h = toNumber(row.distanceToHighwayKm);
-  let highwayScore = 0.1;
-  if (h >= 2) highwayScore = 1;
-  else if (h >= 1) highwayScore = 0.7;
-  else if (h >= 0.5) highwayScore = 0.5;
-  else if (h >= 0.2) highwayScore = 0.3;
-  else highwayScore = 0.1;
-
-  const flightPathScore = row.underFlightPath ? 0.1 : 1;
-  const fee = Math.max(0, toNumber(row.parkingFee1) + toNumber(row.parkingFee2) + toNumber(row.trashFee));
-  const feesScore = clamp01(1 - fee / 400);
-  const leaseTermsScore = (row.subleaseAllowed ? 0.5 : 0) + (row.leaseBreakReasonable ? 0.5 : 0);
-  const amenitiesBase = (row.gated ? 0.35 : 0) + (row.packageLocker ? 0.35 : 0);
-  const parkingBonus = row.parkingType === "garage" ? 0.3 : row.parkingType === "covered" ? 0.2 : 0.1;
-  const amenitiesScore = clamp01(amenitiesBase + parkingBonus);
-  const reviewsScore = clamp01(((toNumber(row.googleRating)/5) + (toNumber(row.yelpRating)/5)) / 2);
-
-  const total = (
-    noiseScore * weights.noise +
-    safetyScore * weights.safety +
-    yearNorm * weights.builtYear +
-    floorNorm * weights.floorLevel +
-    flooringScore * weights.flooring +
-    transitScore * weights.transit +
-    highwayScore * weights.highwayDistance +
-    flightPathScore * weights.flightPath +
-    feesScore * weights.fees +
-    leaseTermsScore * weights.leaseTerms +
-    amenitiesScore * weights.amenities +
-    reviewsScore * weights.reviews
-  ) / wSum;
-
-  return {
-    total: Math.round(total * 100),
-    subs: {
-      noise: Math.round(noiseScore * 100),
-      safety: Math.round(safetyScore * 100),
-      year: Math.round(yearNorm * 100),
-      floor: Math.round(floorNorm * 100),
-      flooring: Math.round(flooringScore * 100),
-      transit: Math.round(transitScore * 100),
-      highway: Math.round(highwayScore * 100),
-      flight: Math.round(flightPathScore * 100),
-      fees: Math.round(feesScore * 100),
-      lease: Math.round(leaseTermsScore * 100),
-      amenities: Math.round(amenitiesScore * 100),
-      reviews: Math.round(reviewsScore * 100),
-      effectiveRent: Math.round(calcEffectiveRent(row)),
-      netMonthly: calcNetMonthly(row)
-    }
-  };
-}
-
-/* ---------- 状态 ---------- */
-let weights = {...defaultWeights};
-let rows = [emptyRow()];
-
-/* ---------- 渲染骨架（一次性） ---------- */
-const weightLabels = {
-  noise:"Noise", safety:"Safety", builtYear:"Built Year", floorLevel:"Floor Level",
-  flooring:"Flooring", transit:"Transit", highwayDistance:"Highway Dist.", flightPath:"Flight Path",
-  fees:"Fees", leaseTerms:"Lease Terms", amenities:"Amenities", reviews:"Reviews"
-};
-
+let weights={...defaultWeights}; let rows=[emptyRow()];
+const weightLabels={noise:"Noise",safety:"Safety",builtYear:"Built Year",floorLevel:"Floor Level",flooring:"Flooring",transit:"Transit",highwayDistance:"Highway Dist.",flightPath:"Flight Path",fees:"Fees",leaseTerms:"Lease Terms",amenities:"Amenities",reviews:"Reviews"};
 function createWeightsUI(){
-  const grid = document.getElementById("weightsGrid");
+  const grid=document.getElementById("weightsGrid");
   Object.entries(weights).forEach(([key,val])=>{
-    const wrap = document.createElement("div");
-    wrap.className = "weights-item";
-    wrap.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div><strong>${weightLabels[key] || key}</strong> <output>${val}</output></div>
+    const wrap=document.createElement("div"); wrap.className="weights-item";
+    wrap.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div><strong>${weightLabels[key]||key}</strong> <output>${val}</output></div>
         <button class="btn" data-weight="${key}" data-action="reset">重置</button>
       </div>
-      <input type="range" min="0" max="30" step="1" value="${val}" data-weight="${key}" />
-    `;
+      <input type="range" min="0" max="30" step="1" value="${val}" data-weight="${key}" />`;
     grid.appendChild(wrap);
   });
   grid.addEventListener("input",(e)=>{
-    const t=e.target;
-    if(t.matches('input[type="range"][data-weight]')){
-      const key=t.dataset.weight; weights[key]=Number(t.value);
-      t.previousElementSibling.querySelector("output").textContent=t.value;
-      // 批量刷新所有计算区（不改输入 DOM）
-      rows.forEach((_,i)=>updateComputed(i));
-    }
+    const t=e.target; if(!t.matches('input[type="range"][data-weight]')) return;
+    const key=t.dataset.weight; weights[key]=Number(t.value); t.previousElementSibling.querySelector("output").textContent=t.value;
+    rows.forEach((_,i)=>updateComputed(i));
   });
   grid.addEventListener("click",(e)=>{
-    const btn=e.target.closest("button[data-action='reset']");
-    if(!btn) return;
+    const btn=e.target.closest("button[data-action='reset']"); if(!btn) return;
     const key=btn.dataset.weight; weights[key]=defaultWeights[key];
     btn.parentElement.querySelector("output").textContent=weights[key];
     btn.parentElement.nextElementSibling.value=weights[key];
     rows.forEach((_,i)=>updateComputed(i));
   });
 }
-
+function inputRow(label,type,key,val,attrs={}){const extra=Object.entries(attrs).map(([k,v])=>`${k}="${v}"`).join(" "); return `<div><label>${label}</label><input type="${type}" data-key="${key}" value="${val}" ${extra} ${type!=="number"?'data-ime':''} /></div>`;}
+function selectRow(label,key,val,options){return `<div><label>${label}</label><select data-key="${key}">${options.map(([v,t])=>`<option value="${v}" ${v===val?'selected':''}>${t}</option>`).join("")}</select></div>`;}
+function checkboxRow(label,key,checked){return `<div><label>${label}</label><div class="switch"><input type="checkbox" data-key="${key}" ${checked?'checked':''} /><span class="muted">${checked?'是':'否'}</span></div></div>`;}
+function subPill(name){return `<div class="pill"><span class="muted">${name}</span><strong data-sub="${name}">-</strong></div>`;}
 function createRowCard(idx){
-  const row = rows[idx];
-  const card = document.createElement("div");
-  card.className = "card";
-  card.dataset.idx = idx;
-
-  card.innerHTML = `
-    <div class="card-h">
-      <h2>房源 <span data-ref="rowNo">${idx+1}</span></h2>
+  const row=rows[idx]; const card=document.createElement("div"); card.className="card"; card.dataset.idx=idx;
+  card.innerHTML=`<div class="card-h"><h2>房源 <span data-ref="rowNo">${idx+1}</span></h2>
       <div class="row-topline">
         <div class="badge">总分：<span data-ref="total">0</span> / 100</div>
         <div class="pill"><span class="muted">Eff. Rent</span><strong>$<span data-ref="effRent">0</span></strong></div>
         <div class="pill"><span class="muted">Net Monthly</span><strong>$<span data-ref="netMonthly">0</span></strong></div>
         <button class="btn danger" data-remove>删除</button>
-      </div>
-    </div>
+      </div></div>
     <div class="card-c">
       <div class="grid g-3">
         ${inputRow("名称 / Name","text","name",row.name)}
         ${inputRow("地址 / Address","text","address",row.address)}
         ${inputRow("挂牌月租（USD）/ Asking Rent","number","rent",row.rent)}
         ${inputRow("租期（月）/ Lease Months","number","leaseMonths",row.leaseMonths)}
-        ${inputRow("优惠免租（周）/ Promo Free Weeks","number","promoWeeks",row.promoWeeks,`<div class='hint'>有效月租：$<span data-ref='effRent2'>0</span>（已考虑免租周）</div>`)}
-        <div>
-          <label>净月支出（优惠后 + 2车位 + 垃圾费）</label>
-          <input type="text" value="" data-ref="netMonthlyInput" readonly />
-        </div>
+        ${inputRow("优惠免租（周）/ Promo Free Weeks","number","promoWeeks",row.promoWeeks,{"step":"1"})}
+        <div><label>净月支出（优惠后 + 2车位 + 垃圾费）</label><input type="text" value="" data-ref="netMonthlyInput" readonly /></div>
       </div>
-
       <div class="hr"></div>
-
       <div class="grid g-5">
         ${inputRow("建造年份 / Built Year","number","builtYear",row.builtYear)}
         ${inputRow("楼层 / Floor Level","number","floorLevel",row.floorLevel)}
@@ -303,17 +175,15 @@ function createRowCard(idx){
         ${selectRow("停车类型 / Parking","parkingType",row.parkingType,[["uncovered","露天"],["covered","有顶棚"],["garage","车库"]])}
         ${checkboxRow("是否有虫害问题 / Pests Seen","pestsSeen",row.pestsSeen)}
       </div>
-
       <div class="hr"></div>
-
       <div class="grid g-5">
-        ${inputRow("距轻轨/地铁（km）","number","distanceToTransitKm",row.distanceToTransitKm,{step:"0.1"})}
-        ${inputRow("距高速（km）","number","distanceToHighwayKm",row.distanceToHighwayKm,{step:"0.1"})}
+        ${inputRow("距轻轨/地铁（km）","number","distanceToTransitKm",row.distanceToTransitKm,{"step":"0.1"})}
+        ${inputRow("距高速（km）","number","distanceToHighwayKm",row.distanceToHighwayKm,{"step":"0.1"})}
         ${checkboxRow("附近是否主干道","nearArterial",row.nearArterial)}
         ${checkboxRow("是否在飞机航线下","underFlightPath",row.underFlightPath)}
         ${inputRow("到机场车程（分钟）","number","airportMinutes",row.airportMinutes)}
-        ${inputRow("你主观的噪音评分（1=安静, 10=很吵）","number","noiseUserScore",row.noiseUserScore,{min:"1",max:"10"})}
-        ${inputRow("社区安全评分（1=差, 10=好）","number","safetyScore",row.safetyScore,{min:"1",max:"10"})}
+        ${inputRow("你主观的噪音评分（1=安静, 10=很吵）","number","noiseUserScore",row.noiseUserScore,{"min":"1","max":"10"})}
+        ${inputRow("社区安全评分（1=差, 10=好）","number","safetyScore",row.safetyScore,{"min":"1","max":"10"})}
         ${inputRow("停车费-第一辆（$/月）","number","parkingFee1",row.parkingFee1)}
         ${inputRow("停车费-第二辆（$/月）","number","parkingFee2",row.parkingFee2)}
         ${inputRow("垃圾/下水道费（$/月）","number","trashFee",row.trashFee)}
@@ -322,205 +192,83 @@ function createRowCard(idx){
         ${checkboxRow("允许转租（Sublease）","subleaseAllowed",row.subleaseAllowed)}
         ${checkboxRow("提前解约条款合理","leaseBreakReasonable",row.leaseBreakReasonable)}
       </div>
-
       <div class="hr"></div>
-
       <div class="grid g-4">
-        ${inputRow("Google 评分（0–5）","number","googleRating",row.googleRating,{step:"0.1",min:"0",max:"5"})}
-        ${inputRow("Yelp 评分（0–5）","number","yelpRating",row.yelpRating,{step:"0.1",min:"0",max:"5"})}
+        ${inputRow("Google 评分（0–5）","number","googleRating",row.googleRating,{"step":"0.1","min":"0","max":"5"})}
+        ${inputRow("Yelp 评分（0–5）","number","yelpRating",row.yelpRating,{"step":"0.1","min":"0","max":"5"})}
         <div class="hint" style="grid-column: span 2;">提示：此分需要手动输入（建议核对近一年评论）。</div>
       </div>
-
       <div class="hr"></div>
-
-      <div>
-        <label>备注 / 亮点笔记</label>
-        <textarea data-key="note" data-ime></textarea>
-      </div>
-
+      <div><label>备注 / 亮点笔记</label><textarea data-key="note" data-ime></textarea></div>
       <div class="hr"></div>
-
       <div class="subscores">
-        ${subPill("Noise")}${subPill("Safety")}${subPill("Year")}${subPill("Floor")}${subPill("Flooring")}${subPill("Transit")}
-        ${subPill("Highway")}${subPill("FlightPath")}${subPill("Fees")}${subPill("Lease")}${subPill("Amenities")}${subPill("Reviews")}
-        ${subPill("Eff. Rent")}${subPill("Net Monthly")}
+        ${["Noise","Safety","Year","Floor","Flooring","Transit","Highway","FlightPath","Fees","Lease","Amenities","Reviews","Eff. Rent","Net Monthly"].map(n=>`<div class='pill'><span class='muted'>${n}</span><strong data-sub='${n}'>-</strong></div>`).join("")}
       </div>
-    </div>
-  `;
-  // 填充备注初值
-  card.querySelector('textarea[data-key="note"]').value = row.note || "";
-  // 绑定事件（增量更新）
-  bindRowEvents(card, idx);
-  // 初次计算
-  updateComputed(idx, card);
+    </div>`;
+  bindRowEvents(card,idx);
+  updateComputed(idx,card);
   return card;
 }
-
-function inputRow(label,type,key,val,attrs={}){
-  const extra = Object.entries(attrs).map(([k,v])=>`${k}="${v}"`).join(" ");
-  return `
-    <div>
-      <label>${label}</label>
-      <input type="${type}" data-key="${key}" value="${val}" ${extra} ${type!=="number"?'data-ime':''} />
-    </div>
-  `;
+function bindRowEvents(card,idx){
+  card.querySelector("[data-remove]").addEventListener("click",()=>{ rows.splice(idx,1); rebuildAll(); });
+  let composing=false;
+  card.addEventListener("compositionstart",(e)=>{ if(e.target.matches("[data-ime]")) composing=true; });
+  card.addEventListener("compositionend",(e)=>{ if(e.target.matches("[data-ime]")) { composing=false; handleInput(e,idx,card);} });
+  card.addEventListener("input",(e)=>{ if(composing && e.target.matches("[data-ime]")) return; handleInput(e,idx,card); });
 }
-function selectRow(label,key,val,options){
-  return `
-    <div>
-      <label>${label}</label>
-      <select data-key="${key}">
-        ${options.map(([v,t])=>`<option value="${v}" ${v===val?'selected':''}>${t}</option>`).join("")}
-      </select>
-    </div>
-  `;
+function handleInput(e,idx,card){
+  const t=e.target, key=t.dataset.key; if(!key) return; const row=rows[idx];
+  if(t.type==="checkbox"){ row[key]=t.checked; const label=t.closest(".switch")?.querySelector(".muted"); if(label) label.textContent=t.checked?"是":"否"; }
+  else if(t.tagName==="SELECT"){ row[key]=t.value; }
+  else if(t.type==="number"){ row[key]=Number(t.value); }
+  else { row[key]=t.value; }
+  queueUpdate(idx,card);
 }
-function checkboxRow(label,key,checked){
-  return `
-    <div>
-      <label>${label}</label>
-      <div class="switch">
-        <input type="checkbox" data-key="${key}" ${checked?'checked':''} />
-        <span class="muted">${checked?'是':'否'}</span>
-      </div>
-    </div>
-  `;
+function updateComputed(idx,card){
+  const s=scoreRow(rows[idx],weights);
+  const $r=(sel)=>card?card.querySelector(sel):document.querySelector(`.card[data-idx="${idx}"] ${sel}`);
+  $r('[data-ref="total"]').textContent=s.total;
+  $r('[data-ref="effRent"]').textContent=s.subs.effectiveRent;
+  const er2=$r('[data-ref="effRent2"]'); if(er2) er2.textContent=s.subs.effectiveRent;
+  $r('[data-ref="netMonthly"]').textContent=s.subs.netMonthly;
+  $r('[data-ref="netMonthlyInput"]').value="$"+s.subs.netMonthly;
+  const map={"Noise":"noise","Safety":"safety","Year":"year","Floor":"floor","Flooring":"flooring","Transit":"transit","Highway":"highway","FlightPath":"flight","Fees":"fees","Lease":"lease","Amenities":"amenities","Reviews":"reviews","Eff. Rent":"effectiveRent","Net Monthly":"netMonthly"};
+  Object.entries(map).forEach(([label,key])=>{ const el=$r(`[data-sub="${label}"]`); if(el) el.textContent=s.subs[key]; });
 }
-function subPill(name){
-  return `<div class="pill"><span class="muted">${name}</span><strong data-sub="${name}">-</strong></div>`;
-}
-
-/* ---------- 绑定与增量更新 ---------- */
-function bindRowEvents(card, idx){
-  // 删除
-  card.querySelector("[data-remove]").addEventListener("click",()=>{
-    rows.splice(idx,1);
-    rebuildAll();
-  });
-
-  // 输入事件：中文 IME 友好
-  let composing = false;
-  card.addEventListener("compositionstart",(e)=>{
-    if(e.target.matches("[data-ime]")) composing = true;
-  });
-  card.addEventListener("compositionend",(e)=>{
-    if(e.target.matches("[data-ime]")) {
-      composing = false;
-      handleInput(e, idx, card);
-    }
-  });
-  card.addEventListener("input",(e)=>{
-    if(composing && e.target.matches("[data-ime]")) return; // 组合输入中，不打断
-    handleInput(e, idx, card);
-  });
-}
-
-function handleInput(e, idx, card){
-  const t = e.target;
-  const key = t.dataset.key;
-  if(!key) return;
-  const row = rows[idx];
-  if(t.type === "checkbox"){
-    row[key] = t.checked;
-    // 同步“是/否”标签
-    const label = t.closest(".switch")?.querySelector(".muted");
-    if(label) label.textContent = t.checked ? "是" : "否";
-  }else if(t.tagName === "SELECT"){
-    row[key] = t.value;
-  }else if(t.type === "number"){
-    row[key] = Number(t.value);
-  }else{
-    row[key] = t.value;
-  }
-  // 仅更新计算区与少量显示，不重建 DOM
-  queueUpdate(idx, card);
-}
-
-function updateComputed(idx, card){
-  const s = scoreRow(rows[idx], weights);
-  const $r = (sel)=>card ? card.querySelector(sel) : document.querySelector(`.card[data-idx="${idx}"] ${sel}`);
-  $r('[data-ref="total"]').textContent = s.total;
-  $r('[data-ref="effRent"]').textContent = s.subs.effectiveRent;
-  $r('[data-ref="effRent2"]').textContent = s.subs.effectiveRent;
-  $r('[data-ref="netMonthly"]').textContent = s.subs.netMonthly;
-  $r('[data-ref="netMonthlyInput"]').value = "$" + s.subs.netMonthly;
-  // 子分
-  const subs = s.subs;
-  const map = {
-    "Noise":"noise","Safety":"safety","Year":"year","Floor":"floor","Flooring":"flooring",
-    "Transit":"transit","Highway":"highway","FlightPath":"flight","Fees":"fees",
-    "Lease":"lease","Amenities":"amenities","Reviews":"reviews","Eff. Rent":"effectiveRent","Net Monthly":"netMonthly"
-  };
-  Object.entries(map).forEach(([label, key])=>{
-    const el = $r(`[data-sub="${label}"]`);
-    if(el) el.textContent = subs[key];
-  });
-}
-
-/* --- RAF 批量更新，避免频繁重排 --- */
-let rafId = null;
-const pending = new Set();
-function queueUpdate(idx, card){
-  pending.add(idx + ":" + (card ? "1" : "0"));
+let rafId=null; const pending=new Set();
+function queueUpdate(idx,card){
+  pending.add(String(idx));
   if(rafId) return;
-  rafId = requestAnimationFrame(()=>{
-    pending.forEach(key=>{
-      const [i] = key.split(":");
-      const cardEl = document.querySelector(`.card[data-idx="${i}"]`);
-      updateComputed(Number(i), cardEl);
-    });
-    pending.clear();
-    rafId = null;
+  rafId=requestAnimationFrame(()=>{
+    pending.forEach(i=>{ const cardEl=document.querySelector(`.card[data-idx="${i}"]`); updateComputed(Number(i),cardEl); });
+    pending.clear(); rafId=null;
   });
 }
-
-/* ---------- 构建 / 重建 ---------- */
 function rebuildAll(){
-  const root = document.getElementById("rowsRoot");
-  root.innerHTML = "";
+  const root=document.getElementById("rowsRoot"); root.innerHTML="";
   rows.forEach((_,i)=> root.appendChild(createRowCard(i)));
 }
-
 function init(){
-  createWeightsUI();
-  rebuildAll();
-
-  document.getElementById("addRowBtn").addEventListener("click",()=>{
-    rows.push(emptyRow());
-    rebuildAll();
-    window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"});
-  });
-
-  document.getElementById("downloadCsvBtn").addEventListener("click", ()=>{
-    const header = [
-      "Name","Address","Rent","LeaseMonths","PromoWeeks","EffectiveRent","NetMonthly","Score",
-      "BuiltYear","Floor","Flooring","TransitKm","HighwayKm","NearArterial","UnderFlightPath","AirportMin",
-      "Noise(1-10)","Safety(1-10)","ParkingFee1","ParkingFee2","TrashFee","Gated","Locker","PestsSeen","Sublease","LeaseBreakReasonable","ParkingType",
-      "GoogleRating","YelpRating","Note"
-    ];
-    const lines = rows.map((row,i)=>{
-      const s = scoreRow(row,weights);
-      return [
-        row.name,row.address,row.rent,row.leaseMonths,row.promoWeeks,s.subs.effectiveRent,s.subs.netMonthly,s.total,
-        row.builtYear,row.floorLevel,row.flooring,row.distanceToTransitKm,row.distanceToHighwayKm,row.nearArterial,row.underFlightPath,row.airportMinutes,
-        row.noiseUserScore,row.safetyScore,row.parkingFee1,row.parkingFee2,row.trashFee,row.gated,row.packageLocker,row.pestsSeen,row.subleaseAllowed,row.leaseBreakReasonable,row.parkingType,
-        row.googleRating,row.yelpRating,JSON.stringify(row.note).replace(/\n/g,"\\n")
-      ].join(",");
-    });
-    const csv = [header.join(","),...lines].join("\n");
-    const blob = new Blob([csv],{type:"text/csv;charset=utf-8;"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = "apartment_scoring_v3.csv"; a.click();
-    URL.revokeObjectURL(url);
+  createWeightsUI(); rebuildAll();
+  document.getElementById("addRowBtn").addEventListener("click",()=>{ rows.push(emptyRow()); rebuildAll(); window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"}); });
+  document.getElementById("downloadCsvBtn").addEventListener("click",()=>{
+    const header=["Name","Address","Rent","LeaseMonths","PromoWeeks","EffectiveRent","NetMonthly","Score","BuiltYear","Floor","Flooring","TransitKm","HighwayKm","NearArterial","UnderFlightPath","AirportMin","Noise(1-10)","Safety(1-10)","ParkingFee1","ParkingFee2","TrashFee","Gated","Locker","PestsSeen","Sublease","LeaseBreakReasonable","ParkingType","GoogleRating","YelpRating","Note"];
+    const lines=rows.map((row,i)=>{ const s=scoreRow(row,weights); return [row.name,row.address,row.rent,row.leaseMonths,row.promoWeeks,s.subs.effectiveRent,s.subs.netMonthly,s.total,row.builtYear,row.floorLevel,row.flooring,row.distanceToTransitKm,row.distanceToHighwayKm,row.nearArterial,row.underFlightPath,row.airportMinutes,row.noiseUserScore,row.safetyScore,row.parkingFee1,row.parkingFee2,row.trashFee,row.gated,row.packageLocker,row.pestsSeen,row.subleaseAllowed,row.leaseBreakReasonable,row.parkingType,row.googleRating,row.yelpRating,JSON.stringify(row.note).replace(/\\n/g,"\\\\n")].join(","); });
+    const csv=[header.join(","),...lines].join("\\n"); const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download="apartment_scoring_v3.csv"; a.click(); URL.revokeObjectURL(url);
   });
 }
-
 document.addEventListener("DOMContentLoaded", init);
 </script>
 </body>
-</html>"""
-path = "/mnt/data/看房评分表（可交互网页ui）-v3-fast.html"
-with open(path, "w", encoding="utf-8") as f:
+</html>
+"""
+clean_path = "/mnt/data/apartment_scoring_v3_clean.html"
+with open(clean_path, "w", encoding="utf-8") as f:
     f.write(html)
-path
+
+# Zip for deploy (index.html)
+zip_path = "/mnt/data/apartment_scoring_v3_clean.zip"
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+    z.writestr("index.html", html)
+
+(clean_path, zip_path)
